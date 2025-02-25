@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param (
     [Parameter()]
-    [string]$GameName = "HOT WHEELS UNLEASHED 2 - Turbocharged"
+    [string]$GameName = "39EA002F.FrigateMS"
 )
 
 $path = (Split-Path $MyInvocation.MyCommand.Path -Parent)
@@ -19,41 +19,30 @@ Start-Transcript -Path "$logsPath\$GameName-$dateNow.log"
 try {
     . .\Helpers.ps1
 
-    $games = Get-StartApps -Name $GameName
-    if ($games.Count -eq 0) {
-        Write-Host "No games found with name '$GameName'"
-        return
-    }
-
-    if ($games.Count -gt 1) {
-        Write-Host "Multiple games found with name '$GameName'"
-        return
-    }
-
-    $game = $games[0]
-
-    $appIdSplit = $game.AppID.Split("!")
-
-    $packageName = $appIdSplit[0]
-
-    $appXInfo = Get-AppxPackage | Where-Object { $_.PackageFullName -eq $packageName -or $_.PackageFamilyName -eq $packageName } `
-    | Select-Object -Property Name, PackageFullName, PackageFamilyName, @{
-        Name       = 'InstallLocation'
-        Expression = {
+    $game = Get-AppxPackage | Select-Object `
+        Name, PackageFullName, PackageFamilyName, @{l = 'InstallLocation'; e = {
+            # Return the junction target instead of the local install folder
             If ((Get-Item $_.InstallLocation).LinkType -eq 'Junction') {
           (Get-Item $_.InstallLocation).Target
             }
             Else { $_.InstallLocation }
         }
-    }
-
-    if ($null -eq $appXInfo) {
-        Write-Host "Game not found in AppxPackages"
+    } `
+        #| Where-Object { Test-Path "$($_.InstallLocation)\MicrosoftGame.config" } `
+    | Where-Object { $_.Name -eq $GameName } # Filter to Xbox games
+    
+    if ($game.Count -eq 0) {
+        Write-Host "No games found with name '$GameName'"
         return
     }
 
-    $gameInfo = Convert-Config -configPath "$($appXInfo.InstallLocation)\MicrosoftGame.config"
-    $manifestInfo = Convert-Manifest -manifestPath "$($appXInfo.InstallLocation)\appxmanifest.xml"
+    if ($game.Count -gt 1) {
+        Write-Host "Multiple games found with name '$GameName'"
+        return
+    }
+
+    $gameInfo = Convert-Config -configPath "$($game.InstallLocation)\MicrosoftGame.config"
+    $manifestInfo = Convert-Manifest -manifestPath "$($game.InstallLocation)\appxmanifest.xml"
 
     if (!$gameInfo.ExecutableList) {
         Write-Host "No executables found"
@@ -79,7 +68,7 @@ try {
         Write-Host "Starting $mainExe..." -ForegroundColor Cyan
     }
 
-    $otherExes = Get-ChildItem -Path "$($appXInfo.InstallLocation)" -Filter "*.exe" -Recurse | Where-Object { $_.Name -ne $mainExe }
+    $otherExes = Get-ChildItem -Path "$($game.InstallLocation)" -Filter "*.exe" -Recurse | Where-Object { $_.Name -ne $mainExe }
     if ($otherExes.Count -gt 0) {
         Write-Host "Other executables found:"
         $otherExes | Select-Object Name, FullName | Format-Table #| ForEach-Object { Write-Host $_.Name }
@@ -87,7 +76,9 @@ try {
 
     $exesRun = @()
 
-    $gameStart = Start-Process -FilePath explorer.exe -ArgumentList "shell:AppsFolder\$($game.AppID)" -PassThru
+    $gameId = $game.PackageFamilyName + "!" + $gameInfo.ExecutableList[0].Id
+
+    $gameStart = Start-Process -FilePath explorer.exe -ArgumentList "shell:AppsFolder\$gameId" -PassThru
     while ($gameStart.HasExited -eq $false) {
         Start-Sleep -Seconds 1
     }

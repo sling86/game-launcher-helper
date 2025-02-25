@@ -2,41 +2,11 @@
 param (
     [Parameter()]
     [string]
-    $username = 'sunshine',
+    $username = 'apollo', # Change this to your apollo/sunshine username
     [Parameter()]
     [SecureString]
     $password = $(ConvertTo-SecureString -AsPlainText 'password' -Force) # Only choose to enter your password here at your own risk, otherwise you can enter it in the console when prompted. If its 'password', it will prompt you for the password no matter what.
 )
-
-function ConvertFrom-SecureStringToPlainText {
-    param (
-        [SecureString] $secureString
-    )
-    $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureString)
-    try {
-        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-    }
-    finally {
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-    }
-}
-
-function Disable-CertificateErrors {
-    # Ignore SSL certificate errors
-    Add-Type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(
-        ServicePoint srvPoint, X509Certificate certificate,
-        WebRequest request, int certificateProblem) {
-        return true;
-    }
-}
-"@
-    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-}
-
 
 $path = (Split-Path $MyInvocation.MyCommand.Path -Parent)
 Set-Location $path
@@ -86,7 +56,49 @@ if ((ConvertFrom-SecureStringToPlainText -secureString $password) -eq 'password'
 
 Write-Host "Checking sunshine for games already added..." -ForegroundColor Cyan
 
-$headers = @{Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($username + ":" + (ConvertFrom-SecureStringToPlainText -secureString $password))) }
+$session = $null
+function Test-CookieNeeded {
+    $cookieValue = $null
+    try {
+        $response = Invoke-WebRequest -Method Post -Uri "https://localhost:47990/api/login" `
+            -Body (@{username = $username; password = (ConvertFrom-SecureStringToPlainText -secureString $password) } | ConvertTo-Json -Depth 1) `
+            -ContentType "application/json" `
+            -SkipCertificateCheck -SessionVariable webSession
+  
+        # Extract the 'Set-Cookie' header from the response
+        $setCookie = $response.Headers["Set-Cookie"]
+        # Print the cookie to the console
+        $cookieValue = $setCookie -split ';' | Select-Object -First 1
+    }
+    catch {
+        try {
+            Disable-CertificateErrors
+            $response = Invoke-WebRequest -Method Post -Uri "https://localhost:47990/api/login" `
+                -Body (@{username = $username; password = (ConvertFrom-SecureStringToPlainText -secureString $password) } | ConvertTo-Json -Depth 1) `
+                -ContentType "application/json" ` -SessionVariable webSession
+                
+            $setCookie = $response.Headers["Set-Cookie"]
+            $cookieValue = $setCookie -split ';' | Select-Object -First 1
+        }
+        catch {
+            Write-Error "Failed to get cookie, $_"
+            return $null
+        }
+    }
+    $script:session = $webSession
+    return $cookieValue
+
+}
+
+$headers = $null
+$cookie = Test-CookieNeeded
+
+if ($null -eq $cookie) {
+    $headers = @{Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($username + ":" + (ConvertFrom-SecureStringToPlainText -secureString $password))) }
+}
+else {
+    $headers = @{Cookie = $cookie }
+}
 
 $currentInstalledApps = @()
 try {
@@ -94,7 +106,8 @@ try {
         -Uri 'https://localhost:47990/api/apps' `
         -Method GET `
         -Headers $headers `
-        -SkipCertificateCheck
+        -SkipCertificateCheck `
+        -WebSession $session
 }
 catch {
     try {
@@ -103,6 +116,7 @@ catch {
             -Uri 'https://localhost:47990/api/apps' `
             -Method GET `
             -Headers $headers `
+            -WebSession $session
     
     }
     catch {
@@ -115,18 +129,25 @@ $installedApps = $currentInstalledApps | Select-Object -ExpandProperty apps
 
 Write-Host "Sunshine games already added: $($installedApps.Count)" -ForegroundColor Green
 
-foreach ($xboxApp in ($xboxApps | Where-Object { $_.gameName -notin $installedApps.name })) {
-    $gameName = $xboxApp.gameName
+$excludedNames = @('ms-resource:AppDisplayName', 'ms-resource:ApplicationDisplayName')
 
-    if ($installedApps | Where-Object { $_.name -eq $gameName }) {
+$gamesAdded = 0
+foreach ($xboxApp in ($xboxApps | Where-Object { $_.manifest.VisualElements.DisplayName -notin $installedApps.name })) {
+    $gameName = $xboxApp.Name
+    $gameDisplayName = $xboxApp.manifest.VisualElements.DisplayName
+    if ($gameDisplayName -in $excludedNames) {
+        $gameDisplayName = $xboxApp.gameName
+    }
+
+    if ($installedApps | Where-Object { $_.name -eq $gameDisplayName }) {
         # Should'nt happen
-        Write-Host "Game already added: $gameName" -ForegroundColor Yellow
+        Write-Host "Game already added: $gameDisplayName" -ForegroundColor Yellow
         continue
     }
 
     $newApp = @{
-        name         = $gameName
-        # output = "$logsPath\$gameName.log"
+        name         = $gameDisplayName
+        output       = "$logsPath\$gameName.log"
         cmd          = "powershell.exe -executionpolicy bypass -file `"$path\Start-WindowsStoreGame.ps1`" -GameName `"$gameName`"" 
         index        = -1
         # 'exclude-global-prep-cmd' = $false
@@ -147,7 +168,7 @@ foreach ($xboxApp in ($xboxApps | Where-Object { $_.gameName -notin $installedAp
         'image-path' = (Join-Path -Path $xboxApp.InstallLocation -ChildPath $xboxApp.manifest.Logo)
     }
 
-    Write-Host "Adding game: $gameName" -ForegroundColor Blue
+    Write-Host "Adding game: $gameDisplayName" -ForegroundColor Blue
     $newAppResponse = $null
     try {
         $newAppResponse = Invoke-RestMethod `
@@ -155,7 +176,8 @@ foreach ($xboxApp in ($xboxApps | Where-Object { $_.gameName -notin $installedAp
             -Method POST `
             -Headers $headers `
             -Body (ConvertTo-Json $newApp) `
-            -SkipCertificateCheck
+            -SkipCertificateCheck `
+            -WebSession $session
     }
     catch {
         try {
@@ -163,14 +185,18 @@ foreach ($xboxApp in ($xboxApps | Where-Object { $_.gameName -notin $installedAp
                 -Uri 'https://localhost:47990/api/apps' `
                 -Method POST `
                 -Headers $headers `
-                -Body (ConvertTo-Json $newApp)
+                -Body (ConvertTo-Json $newApp) `
+                -WebSession $session
         }
         catch {
-            write-error "Failed to add game: $gameName, $_"
+            write-error "Failed to add game: $gameDisplayName, $_"
         }
     }
 
     if ($newAppResponse -and $newAppResponse.status -eq 'true') {
-        Write-Host "Game added: $gameName successfully!" -ForegroundColor Green
+        Write-Host "Game added: $gameDisplayName successfully!" -ForegroundColor Green
+        $gamesAdded++
     }
 }
+
+Write-Host "Games added: $gamesAdded" -ForegroundColor Green

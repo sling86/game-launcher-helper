@@ -111,3 +111,21 @@ function Convert-Manifest {
     return new-object PSObject -Property $hash
     
 }
+
+function ConvertFrom-SecureStringToPlainText {
+    param (
+        [SecureString] $secureString
+    )
+    $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureString)
+    try {
+        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+    }
+    finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+    }
+}
+
+function Disable-CertificateErrors {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+}
