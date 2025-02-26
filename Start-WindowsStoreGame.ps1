@@ -1,9 +1,11 @@
 [CmdletBinding()]
 param (
     [Parameter()]
-    [string]$GameName = "39EA002F.FrigateMS"
+    [string]$GameName = "39EA002F.FrigateMS",
+    [Parameter()]
+    [int]$logsToKeep = 5
 )
-
+"Starting $GameName..."
 $path = (Split-Path $MyInvocation.MyCommand.Path -Parent)
 Set-Location $path
 
@@ -16,20 +18,32 @@ $dateNow = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 
 Start-Transcript -Path "$logsPath\$GameName-$dateNow.log"
 
+$oldLogs = Get-ChildItem -Path $logsPath -Filter "$GameName-*.log" | Where-Object { $_.Name -ne "$GameName-$dateNow.log" } | Sort-Object -Property LastWriteTime
+
+if ($oldLogs.Count -gt $logsToKeep) {
+    Write-Host "Deleting old logs..." -ForegroundColor Yellow
+    $oldLogs | Select-Object -First ($oldLogs.Count - $logsToKeep) | ForEach-Object { 
+        Write-Host "Deleting $($_.Name)" -ForegroundColor Black
+        Remove-Item -Path $_.FullName -Force 
+    }
+}
+
 try {
     . .\Helpers.ps1
 
-    $game = Get-AppxPackage | Select-Object `
-        Name, PackageFullName, PackageFamilyName, @{l = 'InstallLocation'; e = {
+    $game = Get-AppxPackage `
+    | Select-Object -Property Name, PackageFullName, PackageFamilyName, @{
+        Name       = 'InstallLocation'
+        Expression = {
             # Return the junction target instead of the local install folder
-            If ((Get-Item $_.InstallLocation).LinkType -eq 'Junction') {
-          (Get-Item $_.InstallLocation).Target
+            if ((Get-Item $_.InstallLocation).LinkType -eq 'Junction') {
+                    (Get-Item $_.InstallLocation).Target
             }
-            Else { $_.InstallLocation }
+            else { 
+                $_.InstallLocation 
+            }
         }
-    } `
-        #| Where-Object { Test-Path "$($_.InstallLocation)\MicrosoftGame.config" } `
-    | Where-Object { $_.Name -eq $GameName } # Filter to Xbox games
+    } | Where-Object { $_.Name -eq $GameName }
     
     if ($game.Count -eq 0) {
         Write-Host "No games found with name '$GameName'"
@@ -138,4 +152,3 @@ catch {
 finally {
     Stop-Transcript
 }
-
