@@ -129,3 +129,9 @@ function Disable-CertificateErrors {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 }
+
+function Set-ConsoleColour ($bc, $fc) {
+    $Host.UI.RawUI.BackgroundColor = $bc
+    $Host.UI.RawUI.ForegroundColor = $fc
+    Clear-Host
+}

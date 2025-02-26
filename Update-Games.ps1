@@ -148,7 +148,7 @@ foreach ($xboxApp in ($xboxApps | Where-Object { $_.manifest.VisualElements.Disp
     $newApp = @{
         name         = $gameDisplayName
         output       = "$logsPath\$gameName.log"
-        cmd          = "powershell.exe -executionpolicy bypass -file `"$path\Start-WindowsStoreGame.ps1`" -GameName `"$gameName`"" 
+        cmd          = "powershell.exe -WindowStyle Maximized -executionpolicy bypass -file `"$path\Start-WindowsStoreGame.ps1`" -GameName `"$gameName`"" 
         index        = -1
         # 'exclude-global-prep-cmd' = $false
         # elevated = $false

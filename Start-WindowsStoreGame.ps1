@@ -5,9 +5,15 @@ param (
     [Parameter()]
     [int]$logsToKeep = 5
 )
-"Starting $GameName..."
+
 $path = (Split-Path $MyInvocation.MyCommand.Path -Parent)
 Set-Location $path
+
+. "$path\Helpers.ps1"
+
+Set-ConsoleColour 'Black' 'White'
+Write-Host "Starting $GameName..." -ForegroundColor Cyan
+
 
 $logsPath = "$path\Logs"
 if (-not (Test-Path $logsPath)) {
@@ -29,8 +35,6 @@ if ($oldLogs.Count -gt $logsToKeep) {
 }
 
 try {
-    . .\Helpers.ps1
-
     $game = Get-AppxPackage `
     | Select-Object -Property Name, PackageFullName, PackageFamilyName, @{
         Name       = 'InstallLocation'
