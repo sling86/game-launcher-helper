@@ -5,7 +5,10 @@ param (
     $username = 'apollo', # Change this to your apollo/sunshine username
     [Parameter()]
     [SecureString]
-    $password = $(ConvertTo-SecureString -AsPlainText 'password' -Force) # Only choose to enter your password here at your own risk, otherwise you can enter it in the console when prompted. If its 'password', it will prompt you for the password no matter what.
+    $password = $(ConvertTo-SecureString -AsPlainText 'password' -Force), # Only choose to enter your password here at your own risk, otherwise you can enter it in the console when prompted. If its 'password', it will prompt you for the password no matter what.
+    [Parameter()]
+    [switch]
+    $deleteOldGames = $true
 )
 
 $path = (Split-Path $MyInvocation.MyCommand.Path -Parent)
@@ -37,26 +40,129 @@ else {
     Write-Host "Found $($xboxApps.Count) Xbox games" -ForegroundColor Green
 }
 
+$excludedNames = @('ms-resource*', 'ms-resource:IDS_Title2', 'ms-resource:AppDisplayName', 'ms-resource:ApplicationDisplayName')
+
 Write-Host "Parsing game configs..." -ForegroundColor Cyan
 $xboxApps | ForEach-Object {
     $config = Convert-Config -configPath "$($_.InstallLocation)\MicrosoftGame.config"
     $manifest = Convert-Manifest -manifestPath "$($_.InstallLocation)\appxmanifest.xml"
     $gameName = Remove-UnwantedWords -string $manifest.DisplayName
 
+    # $gameName = $_.Name
+    $gameDisplayName = $manifest.VisualElements.DisplayName
+
+    foreach ($excludedName in $excludedNames) {
+        if ($gameDisplayName -like $excludedName) {
+            $gameDisplayName = $gameName
+        }
+        if ($gameDisplayName -like $excludedName) {
+            $gameDisplayName = $_.Name
+        }
+    }
+
     $_ | Add-Member -MemberType NoteProperty -Name gameName -Value $gameName
+    $_ | Add-Member -MemberType NoteProperty -Name gameDisplayName -Value $gameDisplayName
     $_ | Add-Member -MemberType NoteProperty -Name config -Value $config
     $_ | Add-Member -MemberType NoteProperty -Name manifest -Value $manifest
+
 }
 
 Write-Host "Game configs parsed!" -ForegroundColor Magenta
 
-if ((ConvertFrom-SecureStringToPlainText -secureString $password) -eq 'password') {
-    $password = Read-Host "Please enter your sunshine password for user - $username" -AsSecureString
+$serviceNames = @(
+    'SunshineService',
+    'ApolloService'
+)
+
+$existingServices = Get-Service -Name $serviceNames -ErrorAction SilentlyContinue
+$runningService = $existingServices | Where-Object { $_.Status -eq 'Running' }
+if ($null -eq $existingServices) {
+    Write-Host "Sunshine/Apollo service not found, is it installed and running?" -ForegroundColor Red
+    exit
 }
 
-Write-Host "Checking sunshine for games already added..." -ForegroundColor Cyan
+if ($existingServices.Count -gt 1) {
+    Write-Host "Multiple services found!" -ForegroundColor Yellow
+    $servicesRunning = 0
+    foreach ($service in $existingServices) {
+        if ($service.Status -eq 'Running') {
+            $servicesRunning++
+        }
+    }
 
-$session = $null
+    if ($servicesRunning -eq 0) {
+        Write-Host "No services running!" -ForegroundColor Yellow
+        Write-Host "Please start one of the services and try again" -ForegroundColor Yellow
+        exit
+    }
+    if ($servicesRunning -gt 1) {
+        Write-Host "Multiple services running!" -ForegroundColor Yellow
+        Write-Host "Please stop and disable one of the services and try again" -ForegroundColor Yellow
+        Write-Host $runningService.DisplayName
+        exit
+    }
+
+    Write-Host "Using service: $($runningService.Name)" -ForegroundColor Green
+
+}
+
+$currentSystemName = $runningService.DisplayName -split ' ' | Select-Object -First 1
+Write-Host "Current system: $currentSystemName" -ForegroundColor Green
+
+$serviceInfo = Get-CimInstance win32_service | Where-Object { $_.Name -eq $runningService.Name } | Select-Object Name, DisplayName, PathName
+$configPath = Join-Path -Path ( Split-Path -Path (Split-Path -Path $serviceInfo.PathName -Parent) -Parent) -ChildPath 'config'
+$configApps = $null
+if (Test-Path -Path "$configPath\apps.json") {
+    $rawConfig = Get-Content -Path "$configPath\apps.json"
+    $configApps = $rawConfig | ConvertFrom-Json
+    # $configApps = Get-Content -Path "$configPath\apps.json" | ConvertFrom-Json
+}
+
+$excludedApps = @(
+    'Desktop',
+    'Steam Big Picture',
+    'Virtual Desktop'
+)
+
+if ($deleteOldGames -and $configApps) {
+    $removedGames = 0
+    Write-Host "Checking for games to delete..." -ForegroundColor Cyan
+    foreach ($existingApp in $configApps.apps) {
+        if ($existingApp.name -notin $xboxApps.gameDisplayName -and $existingApp.name -notin $excludedApps) {
+            $confirmDelete = Read-Host "Do you want to delete the game: $($existingApp.name)? (Y/N)"
+            if ($confirmDelete.ToLower() -ne 'y') {
+                continue
+            }
+            Write-Host "Removing game: $($existingApp.name) from config!" -ForegroundColor Yellow
+            
+            $configApps.apps = $configApps.apps | Where-Object { $_.name -ne $existingApp.name }
+            $removedGames++
+        }
+    }
+
+    if ($removedGames -gt 0) {
+        $newConfig = $configApps | ConvertTo-Json -Depth 10
+        $newConfigFileTemp = $env:TEMP + '\apps.json'
+        $newConfig | Set-Content -Path $newConfigFileTemp -Force
+        # This needs to run as admin then restart the service as admin
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"Copy-Item -Path '$configPath\apps.json' -Destination '$configPath\apps.json.bak' -Force; Copy-Item -Path '$newConfigFileTemp' -Destination '$configPath\apps.json' -Force; Restart-Service -Name $($runningService.Name) -Force`"" -Verb RunAs -Wait
+        Write-Host "Games removed: $removedGames" -ForegroundColor Green
+    }
+}
+
+if ($username -eq 'apollo' -and $username -ne $currentSystemName.ToLower()) {
+    $username = $currentSystemName.ToLower()
+    Write-Host "Username changed to: $username" -ForegroundColor Yellow
+}
+elseif ($username -eq 'sunshine' -and $username -ne $currentSystemName.ToLower()) {
+    $username = $currentSystemName.ToLower()
+    Write-Host "Username changed to: $username" -ForegroundColor Yellow
+}
+
+if ((ConvertFrom-SecureStringToPlainText -secureString $password) -eq 'password') {
+    $password = Read-Host "Please enter your $currentSystemName password for user - $username" -AsSecureString
+}
+
 function Test-CookieNeeded {
     $cookieValue = $null
     try {
@@ -85,118 +191,146 @@ function Test-CookieNeeded {
             return $null
         }
     }
-    $script:session = $webSession
-    return $cookieValue
+    # $script:session = $webSession
+    return @{
+        cookie  = $cookieValue
+        session = $webSession
+    }
 
 }
 
 $headers = $null
-$cookie = Test-CookieNeeded
+# $cookie = Test-CookieNeeded
+Write-Host "Checking $currentSystemName for games already added..." -ForegroundColor Cyan
+$cookieAndSession = Test-CookieNeeded
 
-if ($null -eq $cookie) {
+if ($null -eq $cookieAndSession) {
     $headers = @{Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($username + ":" + (ConvertFrom-SecureStringToPlainText -secureString $password))) }
 }
 else {
-    $headers = @{Cookie = $cookie }
+    $headers = @{Cookie = $cookieAndSession.cookie }
 }
 
-$currentInstalledApps = @()
-try {
-    $currentInstalledApps = Invoke-RestMethod `
-        -Uri 'https://localhost:47990/api/apps' `
-        -Method GET `
-        -Headers $headers `
-        -SkipCertificateCheck `
-        -WebSession $session
+$configuredApps = $null
+if ($configApps.apps) {
+    $configuredApps = $configApps.apps
 }
-catch {
+else {
+    $currentConfiguredApps = @()
     try {
-        Disable-CertificateErrors
-        $currentInstalledApps = Invoke-RestMethod `
+        $currentConfiguredApps = Invoke-RestMethod `
             -Uri 'https://localhost:47990/api/apps' `
             -Method GET `
             -Headers $headers `
-            -WebSession $session
-    
+            -SkipCertificateCheck `
+            -WebSession $cookieAndSession.session
     }
     catch {
-        Write-Error "Failed to get installed apps from sunshine, $_"
-        return
+        try {
+            Disable-CertificateErrors
+            $currentConfiguredApps = Invoke-RestMethod `
+                -Uri 'https://localhost:47990/api/apps' `
+                -Method GET `
+                -Headers $headers `
+                -WebSession $cookieAndSession.session
+    
+        }
+        catch {
+            Write-Error "Failed to get installed apps from $currentSystemName, $_"
+            return
+        }
     }
+
+
+    $configuredApps = $currentConfiguredApps | Select-Object -ExpandProperty apps | Where-Object { $_.name -notin $excludedApps }
 }
 
-$installedApps = $currentInstalledApps | Select-Object -ExpandProperty apps
 
-Write-Host "Sunshine games already added: $($installedApps.Count)" -ForegroundColor Green
 
-$excludedNames = @('ms-resource:AppDisplayName', 'ms-resource:ApplicationDisplayName')
+Write-Host "$currentSystemName games already added: $($configuredApps.Count)" -ForegroundColor Green
+
+
 
 $gamesAdded = 0
-foreach ($xboxApp in ($xboxApps | Where-Object { $_.manifest.VisualElements.DisplayName -notin $installedApps.name })) {
-    $gameName = $xboxApp.Name
-    $gameDisplayName = $xboxApp.manifest.VisualElements.DisplayName
-    if ($gameDisplayName -in $excludedNames) {
-        $gameDisplayName = $xboxApp.gameName
-    }
+$gamesDeleted = 0
+foreach ($xboxApp in ($xboxApps)) {
 
-    if ($installedApps | Where-Object { $_.name -eq $gameDisplayName }) {
-        # Should'nt happen
-        Write-Host "Game already added: $gameDisplayName" -ForegroundColor Yellow
-        continue
-    }
+    $runName = $xboxApp.name
+    $gameName = $xboxApp.gameName
+    $gameDisplayName = $xboxApp.gameDisplayName
 
-    $newApp = @{
-        name         = $gameDisplayName
-        output       = "$logsPath\$gameName.log"
-        cmd          = "powershell.exe -WindowStyle Maximized -executionpolicy bypass -file `"$path\Start-WindowsStoreGame.ps1`" -GameName `"$gameName`"" 
-        index        = -1
-        # 'exclude-global-prep-cmd' = $false
-        # elevated = $false
-        # 'auto-detach' = $true
-        # 'wait-all' = $true
-        # 'exit-timeout' = 5
-        'prep-cmd'   = @(
-            #     @{
-            #         do = "powershell.exe -executionpolicy bypass -file "" -GameName $gameName -Prep"
-            #         undo = "powershell.exe -executionpolicy bypass -file "" -GameName $gameName -Unprep"
-            #         elevated = $false
-            #     }
-        )
-        'detached'   = @(
-            #     "powershell.exe -executionpolicy bypass -file "" -GameName $gameName -Start"
-        )
-        'image-path' = (Join-Path -Path $xboxApp.InstallLocation -ChildPath $xboxApp.manifest.Logo)
-    }
-
-    Write-Host "Adding game: $gameDisplayName" -ForegroundColor Blue
-    $newAppResponse = $null
-    try {
-        $newAppResponse = Invoke-RestMethod `
-            -Uri 'https://localhost:47990/api/apps' `
-            -Method POST `
-            -Headers $headers `
-            -Body (ConvertTo-Json $newApp) `
-            -SkipCertificateCheck `
-            -WebSession $session
-    }
-    catch {
+    $existingApp = $configuredApps | Where-Object { $_.name -eq $gameDisplayName }
+    
+    if (!$existingApp ) {
+        $newApp = @{
+            name         = $gameDisplayName
+            output       = "$logsPath\$gameName.log"
+            cmd          = "powershell.exe -WindowStyle Maximized -executionpolicy bypass -file `"$path\Start-WindowsStoreGame.ps1`" -GameName `"$runName`"" 
+            index        = -1
+            # 'exclude-global-prep-cmd' = $false
+            # elevated = $false
+            # 'auto-detach' = $true
+            # 'wait-all' = $true
+            # 'exit-timeout' = 5
+            'prep-cmd'   = @(
+                #     @{
+                #         do = "powershell.exe -executionpolicy bypass -file "" -GameName $gameName -Prep"
+                #         undo = "powershell.exe -executionpolicy bypass -file "" -GameName $gameName -Unprep"
+                #         elevated = $false
+                #     }
+            )
+            'detached'   = @(
+                #     "powershell.exe -executionpolicy bypass -file "" -GameName $gameName -Start"
+            )
+            'image-path' = (Join-Path -Path $xboxApp.InstallLocation -ChildPath $xboxApp.manifest.Logo)
+        }
+        Write-Host "Adding game: $gameDisplayName" -ForegroundColor Blue
+        $newAppResponse = $null
         try {
             $newAppResponse = Invoke-RestMethod `
                 -Uri 'https://localhost:47990/api/apps' `
                 -Method POST `
                 -Headers $headers `
                 -Body (ConvertTo-Json $newApp) `
-                -WebSession $session
+                -SkipCertificateCheck `
+                -WebSession $cookieAndSession.session
         }
         catch {
-            write-error "Failed to add game: $gameDisplayName, $_"
+            try {
+                $newAppResponse = Invoke-RestMethod `
+                    -Uri 'https://localhost:47990/api/apps' `
+                    -Method POST `
+                    -Headers $headers `
+                    -Body (ConvertTo-Json $newApp) `
+                    -WebSession $cookieAndSession.session
+            }
+            catch {
+                write-error "Failed to add game: $gameDisplayName, $_"
+            }
+        }
+    
+        if ($newAppResponse -and $newAppResponse.status -eq 'true') {
+            Write-Host "Game added: $gameDisplayName successfully!" -ForegroundColor Green
+            $gamesAdded++
+        }
+        else {
+            Write-Host "Failed to add game: $gameDisplayName" -ForegroundColor Red
         }
     }
-
-    if ($newAppResponse -and $newAppResponse.status -eq 'true') {
-        Write-Host "Game added: $gameDisplayName successfully!" -ForegroundColor Green
-        $gamesAdded++
+    else {
+        Write-Host "Game already added: $gameDisplayName" -ForegroundColor Yellow
     }
 }
 
-Write-Host "Games added: $gamesAdded" -ForegroundColor Green
+if ($gamesDeleted -gt 0) {
+    Write-Host "Games deleted: $gamesDeleted" -ForegroundColor Yellow
+}
+
+if ($gamesAdded -gt 0) {
+    Write-Host "Games added: $gamesAdded" -ForegroundColor Green
+}
+
+Write-Host "Script complete!" -ForegroundColor Green
+
+Write-Host "Exiting in 5 seconds..." -ForegroundColor Cyan
+Start-Sleep -Seconds 5
